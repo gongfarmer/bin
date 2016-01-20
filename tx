@@ -1,0 +1,43 @@
+#!/bin/bash
+
+# Author: Fraser Hanson
+# Date:   2015-09-29 
+# Purpose:
+#         Unpack all the tar archives in $PWD.
+#         Handle gracefully the situation where they're double-zipped but named
+#         like real tar archives.
+# NOTE: --warning=no-timestamp argument suppresses warnings of file timestamps in the future.
+set -e
+
+# Test whether the give *.tar.gz file actually contains a tar archive.
+# If so, unpack tarball.  If not, gunzip the file and try untarring again
+# (recursive.)
+function untar(){
+  local f="$1"
+  if tar tf "$f" > /dev/null 2>&1; then
+    tar xzf "$f" --warning=no-timestamp
+  else
+    # Double-zipped. Unzip before tar.
+    mv "$f"{,.gz}
+    gunzip "$f.gz"
+    untar "$f"
+  fi
+}
+
+
+# If argument list is empty
+if [ -z "$@" ]; then
+  # untar all tarball files
+  for f in *.tar.gz; do 
+    echo "tar xzf $f"
+    untar "$f"
+  done
+
+else
+  # untar the specified files only
+  for f in $@; do
+    echo "tar xzf $f"
+    untar "$f"
+  done
+fi
+
