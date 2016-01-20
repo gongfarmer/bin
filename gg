@@ -1,0 +1,24 @@
+#!/bin/bash
+
+# Author:  Fraser Hanson
+# Date:    2016-01-20
+# Purpose: Shortcut for grepping for multiple terms
+
+# TODO:
+# add color with -c flag, add "highlight $term $term ..." to end 
+# add -i flag for case insensitivity
+
+cmd=""
+
+for term in $@; 
+do
+  if [ -z "$cmd" ]; 
+  then
+    cmd="grep -i '$term' /dev/stdin "
+  else
+    cmd+="| grep -i '$term' "
+  fi
+done
+
+cat /dev/stdin | eval $cmd
+
