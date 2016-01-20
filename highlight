@@ -1,0 +1,172 @@
+#!/usr/bin/env ruby
+
+# Author:  Fraser Hanson
+# Date:    2010-09
+# Purpose: Highlight strings in the input.  
+#          Grep color highlighting without the grepping.
+# FIXME:
+#   -error handling: no such file, no input given, no targets specified,
+#    only one non-flag arg but no input, not enough colors, etc.
+
+#     Options (such as i for case-insensitivity) may be passed to the s///
+#     operator by specifying them as flags on the command line (eg. "-i" =>
+#     s///i).
+
+############################################################
+
+require 'pp'
+require 'stringio'
+
+usage =<<EOF
+usage:
+    #{File.basename($0)} [options] pattern [ pattern ... ] [filename]
+
+    Purpose: highlights in a bright color all occurrences of the string
+    "pattern" inside "text", which is usually coming from a pipe.  
+
+    If no input is piped in, then the last argument is assumed to be a
+    filename.
+
+    Options:
+        -i			    case insensitive 
+        -s			    use same colour for all patterns
+        --colour=n	specify starting colour (as an integer)
+        -w          highlight every word
+        -f <file>   take patterns from lines of a file
+
+EOF
+
+# Special escaped strings to surround any text with to highlight it.
+$Normal    = "\033[0m";
+$Colorfmt  = "\033[1;%sm"
+$color     = 31
+$colors    = Hash.new
+$same_color = false
+
+############################################################
+
+# highlight with case sensitive match
+def highlight_line(string)
+	$targets.each do |t|
+	
+		# match case insensitive if asked nicely
+		if $options.match(/i/)
+			re = Regexp.compile(t, true)
+		else
+			re = Regexp.compile(t, false)
+		end
+
+		# surround each match with terminal color control chars
+		string.gsub!(re) do |s|
+			"%s%s%s" % [get_color(t), $&, $Normal]
+		end
+	end
+
+	string
+end
+
+# given a target string, return the assigned color for that target
+def get_color(string)
+	if $colors[string].nil?
+		$colors[string] = $Colorfmt % $color
+    unless $same_color
+      $color += 1 
+    end
+	end
+	$colors[string]
+end
+############################################################
+
+# Just bail out if output is not to a tty.
+exec "cat" unless $stdout.tty?
+
+# Dump the command line flags into a string, targets into an array
+$options = String.new
+$targets = Array.new
+parsing = :options
+ARGV.each do |a|
+	if "-" != a[0].chr
+		parsing = :targets
+	end
+		
+	if :options == parsing
+		$options << a
+	else
+		$targets << a
+	end
+end
+
+## # DEBUG output
+## puts "Options: %s" % $options
+## puts "Targets: [%s]" % $targets.join("] [")
+
+# Print usage msg and die sometimes
+if $options.match(/-h\>/) or 0 == ARGV.size
+	puts usage
+	exit
+elsif $options.match(/--colou?r=(\d+)/)
+	$color = $1.to_i
+elsif $options.match(/-s\b/)
+	$same_color = true
+elsif $options.match(/-w\b/)
+  ARGV.delete("-w")
+	$every_word = true
+elsif $options.match(/-f\s+([\S]+)/)
+  ARGV.delete("-f")
+	$pattern_file = $1
+end
+
+text = nil
+if $every_word == true
+  text = ARGF.read
+  $targets = text.split.sort.uniq
+elsif ! $pattern_file.nil?
+  $targets = IO.readlines($pattern_file)
+end
+
+
+# Call get_color for each target in order.
+# This is needed so that the assigned colour will depend on the order
+# the targets are specified in on the cmd line, rather than the order
+# they appear in the output.  This is convenient because the colours
+# previously in use stay the same if you re-run highlight on the same input 
+# with added arguments.
+$targets.each do |target|
+	get_color(target)
+end
+
+# FIXME: targets that are subsets of other targets mess this up.
+# Even if the longer target is already highlighted, the smaller target will be
+# highlighted too, leading to nested ANSI escape sequences, which does not
+# work.
+# Examples:
+# Compare this:
+#     echo -e 'dog o\nwood dowry wooden' | highlight.rb dog wood dowry
+# With this:
+#     echo -e 'dog o\nwood dowry wooden' | highlight.rb dog wood dowry o
+
+# Get input lines from $stdin if possible.  
+# Otherwise, assume the last argument is a filename to process.
+lines = Array.new
+if $every_word
+  # Already read STDIN
+  io = StringIO.new(text)
+else
+  if $stdin.tty?
+    io = File.open($targets.pop)
+  else
+    io = $stdin
+  end
+end
+
+begin
+	while (line = io.readline)
+
+		# Highlight and print each line
+		line = highlight_line(line)
+		puts line
+
+	end
+
+rescue EOFError, Interrupt, Errno::EPIPE
+end
