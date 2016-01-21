@@ -1,0 +1,332 @@
+#!/usr/bin/ruby -w
+=begin
+pick 
+Date:    2009-10-30 
+Author:  Fraser Hanson
+Purpose: 
+ Given input from STDIN or a filename, plus a line number, extract the line.
+ Print it, or if given an external command, use the line as an argument to the
+ command.
+
+ You could use xargs to get the next program in the pipe to treat pick's output
+ as an input filename.  xarg's -I{} option is helpful if you don't want pick's
+ output as the final piece of the next program's commandline.
+
+
+ NOTE: you can't exec to non-file arguments like shell builtins.  If you
+ remove /bin/echo, then neither of these will work, despite the built-in echo
+ command:
+    "ruby -e 'exec("echo 1")'
+    "ruby -e 'exec("echo","1")'
+ I assume this holds for aliases and shell functions as well.
+=end
+require 'pp'
+require 'ostruct'
+  
+Usage =<<'END'
+pick [options | input-file | line_numbers ] [cmd [cmd-arguments] ]
+
+PURPOSE
+    This command lets you pick some lines from your input (either STDIN or a
+    file) and use them as arguments for another command.
+
+OPTIONS
+    -q          Print the output with surrounding quotes
+    -0          Terminate the output with a NULL for input to xargs -0
+    -h --help   This help message
+
+NOTES
+    If STDIN is non-empty, it will be used for input.
+    In that case, any filename given will be treated as a command to exec() to.
+
+    If the external command's arguments include {}, it will be replaced by the
+    picked line before the command runs.  Otherwise, the picked line will be
+    added as the final argument.
+
+    If no line number is given, the entire output will be printed, with line
+    numbers inserted at the start of each line.  
+
+    NOTE: it cannot deal with input file names or command names that are numeric.
+    It will believe they are line numbers.
+
+EXAMPLE
+    $ echo -e "a\nb\nc" | pick 1
+    a
+
+    $ echo -e "a\nb\nc" > file.txt
+    $ cat file.txt | pick 1 
+    a
+
+    $ pick file.txt 2 3
+    b c
+
+    $ pick 1 file.txt
+    a
+
+    $ cat file.txt | pick 1 file.txt
+    Error: Cannot execute file 'file.txt'
+
+Note that the last two commands look the same, but the one with the STDIN
+input treats the filename as something to 'exec' to rather than something to
+read
+
+    $ cat file | pick 1 file
+    Error: Cannot execute file 'file'
+
+    # It handles spaces in filenames gracefully too
+    fraser@ged:~$ locate "Robot Chicken" | grep avi$ | head -20 | pick 11 totem
+    totem /data/downloads/Robot Chicken/Robot Chicken Star Wars.avi
+
+    # The picked line is used as the last argument to the given command
+    fhanson@fhanson:~$ echo -e "a\nb\nc" | pick 2 echo
+    echo b
+    b
+
+    # If you put {} in the arguments for the external command, it will be
+    # replaced by the picked line, in case you want the arg in a non-last position:
+    fhanson@fhanson:~$ echo -e "a\nb\nc" | pick 2 echo a {} c
+    echo a b c
+    a b c
+
+    # Open a vim session showing the two files named on lines 4 and 6 of the
+    # given input, and search for the string 'file' within them.
+    # (The <dev/tty thing is a special case to work around some vim brokenness)
+    fhanson@fhanson:/tmp$ cat file | pick 5 6 vim -o {} +/file
+    </dev/tty vim -o "suck it.txt" "/home/tmp/suck it 2.txt" +/file
+    2 files to edit
+
+END
+
+class Error < RuntimeError;
+end
+
+# Attempt to get a filename from the given string.  If the argument is a file
+# that exists, return the filename.  Otherwise, return nil.
+def get_filename(str)
+  if File.exist?(str)
+    str
+  else
+    nil
+  end
+end
+
+# Attempt to get an integer from the given string.  If not possible, return nil.
+# Numbering starts from 1, not zero.  If given zero, just treat it the same as 1.
+# Negative indices are allowed, they start from the last line.
+def get_line_number(str)
+  if str =~ /^\-?\d+$/
+    i = str.to_i
+    i -= 1 unless i <= 0  
+    i
+  else
+    nil
+  end
+end
+
+def print_numbered_output(lines)
+  n = lines.size.to_s.size
+  fmt = "%#{n}d %s"
+  lines.each_with_index do |line,i|
+    puts fmt % [i+1, line]
+  end
+end
+
+# Print the target lines
+def print_targets(target_lines)
+  output = 
+    if OPTIONS.quote
+      target_lines.map {|str| '"%s"' % str.strip }.join(" ")
+    else
+      target_lines.map {|str| str.strip }.join(" ")
+    end
+
+  # Append trailing null if requested, otherwise trailing newline
+  output << (OPTIONS.null ?  0.chr : "\n")
+  print output
+end
+
+
+def parse_args(argv)
+  options = OpenStruct.new
+  options.quote        = false
+  options.null         = false
+  options.number       = false
+  options.line_numbers = Array.new
+  options.input        = $stdin.tty?  ? nil : $stdin
+
+  argv.each_with_index do |arg, index|
+    case arg
+    when /^-?\d+$/
+      options.line_numbers << get_line_number(arg)
+
+    when /^-/
+      parse_flag(arg, options)
+
+    else
+      handle_input_file_or_command(arg, options)
+    end
+
+    # If a command to exec() to has been found, then any further arguments
+    # are for that command. Cease argument parsing in that case.
+    unless options.command.nil?
+      options.command.concat( argv[index+1 .. -1] )
+      break
+    end
+
+  end
+
+  if options.line_numbers.empty?
+    options.number = true
+  end
+
+  options
+end
+
+# Given a (possibly non-existent) filename and the option struct, determine if
+# the file should be treated as an input file or a command.
+def handle_input_file_or_command(str, options)
+  if options.input.nil?
+    # No input source was specified yet, so this is the input file.
+    confirm_input_file_viability(str)
+    options.input = File.open(str,"r")
+
+  else
+    # We already have an input source, so this must be a command.
+    # Store it in an array, so that arguments to this command can be extracted
+    # from ARGV and added into here later
+    raise Error.new("Multiple commands were specified") unless options.command.nil?
+    options.command = [str]
+  end
+end
+
+
+def confirm_input_file_viability(filename)
+  unless File.exist?(filename)
+    msg = "Specified input file does not exist: #{filename}"
+    raise Error.new(msg)
+  end
+  if File.directory?(filename)
+    msg = "Specified input file is actually a directory: #{filename}"
+    raise Error.new(msg)
+  end
+  unless File.readable?(filename)
+    msg = "Specified input file is not readable: #{filename}"
+    raise Error.new(msg)
+  end
+  
+end
+
+def usage
+  puts Usage
+  exit 0
+end
+
+
+def parse_flag(flag, options)
+  case flag
+  when  "-h","--help"  # show help
+    usage()
+  when  "-q"  # surround output line with quotes
+    options.quote = true
+  when  "-0"  # terminate line with null char, like find -print0
+    options.null = true
+  else
+    raise Error.new("Unknown option flag: #{flag}")
+  end
+end
+
+# Decide where to insert the picked line into the command's arguments.
+# Replace "{}" if that exists, otherwise tack it onto the end.
+# Then exec into the command.
+# exec() can take an array of arguments or a string, an array is preferred
+# because it preserves the splitting of the arguments.
+#
+# NOTE: Special handling of vim
+# Vim leaves the terminal in an inconsistent state after being
+# invoked from a non-interactive process like this one.
+#
+# This can be dealt with in two ways that I know of so far:
+# -We can clean up after it by invoking "reset -IQ" after vim runs.  We still
+#  get the initial warning about input not from a terminal but the terminal is
+#  left in a consistent state.
+#  (eg. vim <args> && reset -IQ)
+# -We can prevent it from occurring at all by explictly using /dev/tty as input.
+#  I don't really understand how this works but it does.
+#  This also prevents the little warning message and delay from vim at startup.
+#  (eg. sh -c '</dev/tty vim <args>')
+#
+# However, to use either solution we must exec() into a subshell instead of
+# into the target executable directly.  This means greater chances of screwing
+# up the argument parsing.
+# Note that less and other interactive programs do not do this, it appears to
+# be vim-specific.
+def execute_action(target_lines)
+
+  index = OPTIONS.command.index("{}")
+  if index.nil?
+    OPTIONS.command.concat(target_lines)
+  else
+    OPTIONS.command[index] = target_lines
+    OPTIONS.command.flatten!
+  end
+
+  begin
+
+    if ["vim","view","rvim","vi"].include?(OPTIONS.command.first)
+      # Quote all arguments that have whitespace
+      cmd = OPTIONS.command.map{ |arg| (arg =~ /\s/) ? %Q["#{arg}"] : arg  }.join(" ")
+#      cmd << " && reset -IQ"
+#      cmd = "sh -c '</dev/tty #{cmd}'"
+      cmd = "</dev/tty #{cmd}"
+      puts cmd
+      exec cmd
+
+    else
+      puts OPTIONS.command.join(" ")
+      exec( *(OPTIONS.command) )
+    end
+
+  rescue Errno::ENOENT => e
+    raise Error.new(e.to_s)
+  end
+
+end
+
+def main()
+  raise Error.new("No input provided.") if OPTIONS.input.nil?
+  lines = OPTIONS.input.readlines.map {|str| str.strip }
+
+  if OPTIONS.number
+    print_numbered_output(lines)
+    exit 0
+  end
+
+  # Check for line numbers that exceed the input size
+  bad_indexes = OPTIONS.line_numbers.select {|n| n >= lines.size}
+  unless bad_indexes.empty?
+    msg =  "Some requested line numbers are too large for this input: " 
+    msg << bad_indexes.map{|n| n+1 }.join(",")
+    raise Error.new(msg)
+  end
+
+  target_lines = OPTIONS.line_numbers.map {|i| lines[i] }
+
+  if OPTIONS.command.nil?
+    print_targets(target_lines)
+  else
+    execute_action(target_lines)
+  end
+
+end
+
+begin
+  OPTIONS = parse_args(ARGV)
+  main()
+rescue Errno::EPIPE, Interrupt
+  exit 0
+rescue Error => e
+  puts e.to_s
+  exit 1
+end
+
+# vim: ts=2 sw=2 expandtab
