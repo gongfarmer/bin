@@ -8,6 +8,7 @@
 #         like real tar archives.
 # NOTE: --warning=no-timestamp argument suppresses warnings of file timestamps in the future.
 set -e
+set -x
 
 # Test whether the give *.tar.gz file actually contains a tar archive.
 # If so, unpack tarball.  If not, gunzip the file and try untarring again
@@ -36,8 +37,11 @@ if [ -z "$@" ]; then
 else
   # untar the specified files only
   for f in $@; do
-    echo "tar xzf $f"
-    untar "$f"
+    # if file exists and is non-zero
+    if test -s $f; then
+      echo "tar xzf $f"
+      untar "$f"
+    fi
   done
 fi
 
